@@ -3,6 +3,7 @@ import numpy as np
 
 from math import pi
 
+
 def calculate_matmul_n_times(n_components, mat_a, mat_b):
     """
     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
@@ -33,6 +34,36 @@ def calculate_matmul(mat_a, mat_b):
     assert mat_a.shape[-2] == 1 and mat_b.shape[-1] == 1
     return tf.reduce_sum(tf.squeeze(mat_a, -2) * tf.squeeze(mat_b, -1), axis=2, keepdims=True)
 
+# def calculate_matmul_n_times(n_components, mat_a, mat_b):
+#     """
+#     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
+#     Bypasses torch.matmul to reduce memory footprint.
+#     args:
+#         mat_a:      torch.Tensor (n, k, 1, d)
+#         mat_b:      torch.Tensor (1, k, d, d)
+#     """
+#     res = torch.zeros(mat_a.shape).double().to(mat_a.device)
+#
+#     for i in range(n_components):
+#         mat_a_i = mat_a[:, i, :, :].squeeze(-2)
+#         mat_b_i = mat_b[0, i, :, :].squeeze()
+#         res[:, i, :, :] = mat_a_i.mm(mat_b_i).unsqueeze(1)
+#
+#     return res
+#
+#
+# def calculate_matmul(mat_a, mat_b):
+#     """
+#     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
+#     Bypasses torch.matmul to reduce memory footprint.
+#     args:
+#         mat_a:      torch.Tensor (n, k, 1, d)
+#         mat_b:      torch.Tensor (n, k, d, 1)
+#     """
+#     assert mat_a.shape[-2] == 1 and mat_b.shape[-1] == 1
+#     res = torch.sum(mat_a.squeeze(-2) * mat_b.squeeze(-1), dim=2, keepdim=True)
+#
+#     return res
 
 class GaussianMixture(tf.keras.models.Model):
     """
@@ -99,6 +130,7 @@ class GaussianMixture(tf.keras.models.Model):
         assert self.init_params in ["kmeans", "random"]
 
 
+
     def _init_params(self):
         if self.mu_init is not None:
             assert self.mu_init.shape == (1, self.n_components,
@@ -107,13 +139,14 @@ class GaussianMixture(tf.keras.models.Model):
             # (1, k, d)
             self.mu = self.add_weight(name='mu',
                                      shape=self.mu_init.shape,
+                                     initializer=tf.initializers.Constant(self.mu_init),
                                      dtype='float32',
-                                     initializer=tf.initializers.constant(self.mu_init),
                                      trainable=False,
                                      )
         else:
             self.mu = self.add_weight(name='mu', shape=(1, self.n_components, self.n_features), dtype='float32',
-                                      initializer=tf.initializers.random_normal(stddev=1., seed=self.random_state), trainable=False)
+                                      initializer=tf.initializers.Zeros(),
+                                      trainable=False)
 
         if self.covariance_type == "diag":
             if self.var_init is not None:
@@ -189,7 +222,7 @@ class GaussianMixture(tf.keras.models.Model):
 
         if self.init_params == "kmeans" and self.mu_init is None:
             mu = self.get_kmeans_mu(x, n_centers=self.n_components)
-            self.mu.data = mu
+            self.mu = mu
 
         i = 0
         j = np.inf
@@ -206,14 +239,14 @@ class GaussianMixture(tf.keras.models.Model):
             if tf.math.is_inf(tf.abs(self.log_likelihood)) or tf.math.is_nan(self.log_likelihood):
                 # When the log-likelihood assumes inane values, reinitialize model
                 self.__init__(self.n_components,
-                              self.n_features,
                               covariance_type=self.covariance_type,
                               mu_init=self.mu_init,
                               var_init=self.var_init,
                               eps=self.eps)
 
                 if self.init_params == "kmeans":
-                    self.mu.data, = self.get_kmeans_mu(x, n_centers=self.n_components)
+                    self.mu = self.get_kmeans_mu(x, n_centers=self.n_components)
+                    print('111', tf.reduce_mean(self.mu))
 
             i += 1
             j = self.log_likelihood - log_likelihood_old
@@ -290,12 +323,14 @@ class GaussianMixture(tf.keras.models.Model):
             log_det = self._calculate_log_det(precision)
             log_det = tf.cast(log_det, tf.double)
 
+
             x = tf.cast(x, tf.double)
             mu = tf.cast(mu, tf.double)
-            x_mu_T = tf.expand_dims((x - mu), (-2))
-            x_mu = tf.expand_dims((x - mu), (-1))
+            x_mu_T = tf.expand_dims((x - mu), -2)
+            x_mu = tf.expand_dims((x - mu), -1)
 
             x_mu_T_precision = calculate_matmul_n_times(self.n_components, x_mu_T, precision)
+            # print(x_mu_T_precision, x_mu_T, x, mu)
             x_mu_T_precision_x_mu = calculate_matmul(x_mu_T_precision, x_mu)
 
             return -.5 * (log_2pi - log_det + x_mu_T_precision_x_mu)
@@ -319,7 +354,8 @@ class GaussianMixture(tf.keras.models.Model):
 
         for k in range(self.n_components):
             evals, evecs = tf.linalg.eig(var[0, k])
-            log_det.append(tf.reduce_sum(tf.math.log(evals)))
+
+            log_det.append(tf.reduce_sum(tf.math.log(tf.math.real(evals))))
         log_det = tf.convert_to_tensor(log_det)
         return tf.expand_dims(log_det, -1)
 
@@ -389,6 +425,7 @@ class GaussianMixture(tf.keras.models.Model):
             x:          torch.Tensor (n, 1, d)
         """
         _, log_resp = self._e_step(x)
+
         pi, mu, var = self._m_step(x, log_resp)
 
         self.__update_pi(pi)
@@ -427,7 +464,7 @@ class GaussianMixture(tf.keras.models.Model):
         if mu.shape == (self.n_components, self.n_features):
             self.mu = tf.expand_dims(mu, 0)
         elif mu.shape == (1, self.n_components, self.n_features):
-            self.mu.data = mu
+            self.mu = mu
 
     def __update_var(self, var):
         """
@@ -444,7 +481,7 @@ class GaussianMixture(tf.keras.models.Model):
             if var.shape == (self.n_components, self.n_features, self.n_features):
                 self.var = tf.expand_dims(var, 0)
             elif var.shape == (1, self.n_components, self.n_features, self.n_features):
-                self.var.data = var
+                self.var = var
 
         elif self.covariance_type == "diag":
             assert var.shape in [(self.n_components, self.n_features), (1, self.n_components,
@@ -486,7 +523,7 @@ class GaussianMixture(tf.keras.models.Model):
 
         for i in range(init_times):
             tmp_center = x.numpy()[np.random.choice(np.arange(x.shape[0]), size=n_centers, replace=False), ...]
-            l2_dis = tf.norm(tf.tile(tf.expand_dims(x, 1), (1, n_centers, 1)) - tmp_center, ord=self.n_init, axis=2)
+            l2_dis = tf.norm(tf.tile(tf.expand_dims(x, 1), (1, n_centers, 1)) - tmp_center, ord=2, axis=2)
             l2_cls = tf.argmin(l2_dis, axis=1)
 
             cost = 0
@@ -498,15 +535,22 @@ class GaussianMixture(tf.keras.models.Model):
                 center = tmp_center
 
         delta = np.inf
-
         while delta > min_delta:
-            l2_dis = tf.norm(tf.tile(tf.expand_dims(x, 1), (1, n_centers, 1)) - center, ord=self.n_init, axis=2)
+            l2_dis = tf.norm(tf.tile(tf.expand_dims(x, 1), (1, n_centers, 1)) - center, ord=2, axis=2)
             l2_cls = tf.argmin(l2_dis, axis=1)
-            center_old = center
+            center_old = tf.convert_to_tensor(center, dtype=tf.double)
 
             for c in range(n_centers):
                 center[c] = tf.reduce_mean(x[l2_cls == c], axis=0)
 
-            delta = tf.reduce_max(tf.norm((center_old - center), axis=1))
+            delta = tf.reduce_max(tf.reduce_sum(tf.square(center_old - center), axis=1))
 
-        return (tf.expand_dims(center, 0) * (x_max - x_min) + x_min)
+        return tf.expand_dims(center, 0) * (x_max - x_min) + x_min
+
+
+
+if __name__ == '__main__':
+    model = GaussianMixture(3)
+    model.n_features = 3
+    model._init_params()
+    _, log = model._e_step(np.ones((9, 3)))
