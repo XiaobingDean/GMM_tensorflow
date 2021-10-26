@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 
+import numbers
 from math import pi
 
 
@@ -34,36 +35,25 @@ def calculate_matmul(mat_a, mat_b):
     assert mat_a.shape[-2] == 1 and mat_b.shape[-1] == 1
     return tf.reduce_sum(tf.squeeze(mat_a, -2) * tf.squeeze(mat_b, -1), axis=2, keepdims=True)
 
-# def calculate_matmul_n_times(n_components, mat_a, mat_b):
-#     """
-#     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
-#     Bypasses torch.matmul to reduce memory footprint.
-#     args:
-#         mat_a:      torch.Tensor (n, k, 1, d)
-#         mat_b:      torch.Tensor (1, k, d, d)
-#     """
-#     res = torch.zeros(mat_a.shape).double().to(mat_a.device)
-#
-#     for i in range(n_components):
-#         mat_a_i = mat_a[:, i, :, :].squeeze(-2)
-#         mat_b_i = mat_b[0, i, :, :].squeeze()
-#         res[:, i, :, :] = mat_a_i.mm(mat_b_i).unsqueeze(1)
-#
-#     return res
-#
-#
-# def calculate_matmul(mat_a, mat_b):
-#     """
-#     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
-#     Bypasses torch.matmul to reduce memory footprint.
-#     args:
-#         mat_a:      torch.Tensor (n, k, 1, d)
-#         mat_b:      torch.Tensor (n, k, d, 1)
-#     """
-#     assert mat_a.shape[-2] == 1 and mat_b.shape[-1] == 1
-#     res = torch.sum(mat_a.squeeze(-2) * mat_b.squeeze(-1), dim=2, keepdim=True)
-#
-#     return res
+def check_random_state(seed):
+    """Turn seed into a np.random.RandomState instance
+
+    Parameters
+    ----------
+    seed : None | int | instance of RandomState
+        If seed is None, return the RandomState singleton used by np.random.
+        If seed is an int, return a new RandomState instance seeded with seed.
+        If seed is already a RandomState instance, return it.
+        Otherwise raise ValueError.
+    """
+    if seed is None or seed is np.random:
+        return np.random.mtrand._rand
+    if isinstance(seed, (numbers.Integral, np.integer)):
+        return np.random.RandomState(seed)
+    if isinstance(seed, np.random.RandomState):
+        return seed
+    raise ValueError('%r cannot be used to seed a numpy.random.RandomState'
+                     ' instance' % seed)
 
 class GaussianMixture(tf.keras.models.Model):
     """
@@ -218,45 +208,59 @@ class GaussianMixture(tf.keras.models.Model):
         self.n_features = x.shape[1]
         self._init_params()
 
-        x = self.check_size(x)
+        mu_best = self.mu
+        var_best = self.var
+        log_likelihood_best = self.log_likelihood
 
-        if self.init_params == "kmeans" and self.mu_init is None:
-            mu = self.get_kmeans_mu(x, n_centers=self.n_components)
-            self.mu = mu
+        for init in range(self.n_init):
+            x = self.check_size(x)
 
-        i = 0
-        j = np.inf
+            if self.init_params == "kmeans" and self.mu_init is None:
+                mu = self.get_kmeans_mu(x, n_centers=self.n_components)
+                self.mu = mu
 
-        while (i <= self.max_iter) and (j >= self.tol):
+            i = 0
+            j = np.inf
 
-            log_likelihood_old = self.log_likelihood
-            mu_old = self.mu
-            var_old = self.var
+            while (i <= self.max_iter) and (j >= self.tol):
 
-            self.__em(x)
-            self.log_likelihood = self.__score(x)
+                log_likelihood_old = self.log_likelihood
+                mu_old = self.mu
+                var_old = self.var
 
-            if tf.math.is_inf(tf.abs(self.log_likelihood)) or tf.math.is_nan(self.log_likelihood):
-                # When the log-likelihood assumes inane values, reinitialize model
-                self.__init__(self.n_components,
-                              covariance_type=self.covariance_type,
-                              mu_init=self.mu_init,
-                              var_init=self.var_init,
-                              eps=self.eps)
+                self.__em(x)
+                self.log_likelihood = self.__score(x)
 
-                if self.init_params == "kmeans":
-                    self.mu = self.get_kmeans_mu(x, n_centers=self.n_components)
-                    print('111', tf.reduce_mean(self.mu))
+                if tf.math.is_inf(tf.abs(self.log_likelihood)) or tf.math.is_nan(self.log_likelihood):
+                    # When the log-likelihood assumes inane values, reinitialize model
+                    self.__init__(self.n_components,
+                                  covariance_type=self.covariance_type,
+                                  mu_init=self.mu_init,
+                                  var_init=self.var_init,
+                                  eps=self.eps)
 
-            i += 1
-            j = self.log_likelihood - log_likelihood_old
+                    if self.init_params == "kmeans":
+                        self.mu = self.get_kmeans_mu(x, n_centers=self.n_components)
+                        print('111', tf.reduce_mean(self.mu))
 
-            if j <= self.tol:
-                # When score decreases, revert to old parameters
-                self.__update_mu(mu_old)
-                self.__update_var(var_old)
+                i += 1
+                j = self.log_likelihood - log_likelihood_old
 
-        self.params_fitted = True
+                if j <= self.tol:
+                    # When score decreases, revert to old parameters
+                    self.__update_mu(mu_old)
+                    self.__update_var(var_old)
+
+                    if self.log_likelihood > log_likelihood_best:
+                        log_likelihood_best = self.log_likelihood
+                        mu_best = self.mu
+                        var_best = self.var
+
+            self.params_fitted = True
+
+        self.__update_mu(mu_best)
+        self.__update_var(var_best)
+
 
     def predict(self, x, probs=False):
         """
@@ -519,10 +523,12 @@ class GaussianMixture(tf.keras.models.Model):
         x_min, x_max = tf.reduce_min(x), tf.reduce_max(x)
         x = (x - x_min) / (x_max - x_min)
 
+        random_state = check_random_state(self.random_state)
+
         min_cost = np.inf
 
         for i in range(init_times):
-            tmp_center = x.numpy()[np.random.choice(np.arange(x.shape[0]), size=n_centers, replace=False), ...]
+            tmp_center = x.numpy()[random_state.choice(np.arange(x.shape[0]), size=n_centers, replace=False), ...]
             l2_dis = tf.norm(tf.tile(tf.expand_dims(x, 1), (1, n_centers, 1)) - tmp_center, ord=2, axis=2)
             l2_cls = tf.argmin(l2_dis, axis=1)
 
