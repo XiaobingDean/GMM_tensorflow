@@ -4,7 +4,6 @@ import numpy as np
 import numbers
 from math import pi
 
-
 def calculate_matmul_n_times(n_components, mat_a, mat_b):
     """
     Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
@@ -195,6 +194,12 @@ class GaussianMixture(tf.keras.models.Model):
 
         return bic
 
+    def __check_inv(self):
+        result = tf.linalg.inv(self.var)
+        if tf.reduce_sum(tf.cast(tf.math.is_nan(result), tf.int32)) > 0:
+            return 1
+        return 0
+
     def fit(self, x, warm_start=False):
         """
         Fits model to the data.
@@ -221,14 +226,21 @@ class GaussianMixture(tf.keras.models.Model):
 
             i = 0
             j = np.inf
-
             while (i <= self.max_iter) and (j >= self.tol):
 
                 log_likelihood_old = self.log_likelihood
                 mu_old = self.mu
                 var_old = self.var
 
+                if self.__check_inv():
+                    init -= 1
+                    break
                 self.__em(x)
+
+                if self.__check_inv():
+                    init -= 1
+                    break
+
                 self.log_likelihood = self.__score(x)
 
                 if tf.math.is_inf(tf.abs(self.log_likelihood)) or tf.math.is_nan(self.log_likelihood):
@@ -241,7 +253,6 @@ class GaussianMixture(tf.keras.models.Model):
 
                     if self.init_params == "kmeans":
                         self.mu = self.get_kmeans_mu(x, n_centers=self.n_components)
-                        print('111', tf.reduce_mean(self.mu))
 
                 i += 1
                 j = self.log_likelihood - log_likelihood_old
@@ -251,10 +262,11 @@ class GaussianMixture(tf.keras.models.Model):
                     self.__update_mu(mu_old)
                     self.__update_var(var_old)
 
-                    if self.log_likelihood > log_likelihood_best:
-                        log_likelihood_best = self.log_likelihood
-                        mu_best = self.mu
-                        var_best = self.var
+            # update weights with best performance
+            if self.log_likelihood > log_likelihood_best:
+                log_likelihood_best = self.log_likelihood
+                mu_best = self.mu
+                var_best = self.var
 
             self.params_fitted = True
 
@@ -320,6 +332,7 @@ class GaussianMixture(tf.keras.models.Model):
             mu = self.mu
             var = self.var
             precision = tf.linalg.inv(var)
+
             d = x.shape[-1]
 
             log_2pi = d * tf.math.log(2. * pi)
@@ -357,6 +370,7 @@ class GaussianMixture(tf.keras.models.Model):
         log_det = []
 
         for k in range(self.n_components):
+
             evals, evecs = tf.linalg.eig(var[0, k])
 
             log_det.append(tf.reduce_sum(tf.math.log(tf.math.real(evals))))
@@ -428,6 +442,7 @@ class GaussianMixture(tf.keras.models.Model):
         args:
             x:          torch.Tensor (n, 1, d)
         """
+
         _, log_resp = self._e_step(x)
 
         pi, mu, var = self._m_step(x, log_resp)
