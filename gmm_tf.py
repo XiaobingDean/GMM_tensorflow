@@ -64,8 +64,8 @@ class GaussianMixture(tf.keras.models.Model):
     or (1, k, 1) if they assign membership probabilities to one of the mixture components.
     """
 
-    def __init__(self, n_components, covariance_type="full", eps=1.e-6, init_params="kmeans", mu_init=None,
-                 var_init=None, n_init=2, max_iter=1000, tol=1e-3, random_state=None):
+    def __init__(self, n_components, covariance_type="full", eps=1e-6, init_params="kmeans", mu_init=None,
+                 var_init=None, n_init=2, max_iter=100, tol=1e-3, batch=0, random_state=None):
         """
         Initializes the model and brings all tensors into their required shape.
         The class expects data to be fed as a flat tensor in (n, d).
@@ -103,6 +103,7 @@ class GaussianMixture(tf.keras.models.Model):
         self.max_iter = max_iter
         self.tol = tol
         self.random_state = random_state
+        self.batch = batch
 
         self.n_components = n_components
 
@@ -133,7 +134,7 @@ class GaussianMixture(tf.keras.models.Model):
                                      trainable=False,
                                      )
         else:
-            self.mu = self.add_weight(name='mu', shape=(1, self.n_components, self.n_features), dtype='float32',
+            self.mu = self.add_weight(name='mu', shape=(1, self.n_components, self.n_features), dtype='double',
                                       initializer=tf.initializers.Zeros(),
                                       trainable=False)
 
@@ -143,10 +144,10 @@ class GaussianMixture(tf.keras.models.Model):
                 assert self.var_init.shape == (1, self.n_components, self.n_features), \
                     "Input var_init does not have required tensor dimensions (1, %i, %i)" % (
                         self.n_components, self.n_features)
-                self.var = self.add_weight(name='var', shape=self.var_init.shape, dtype='float32',
+                self.var = self.add_weight(name='var', shape=self.var_init.shape, dtype='double',
                                            initializer=tf.initializers.constant(self.var_init), trainable=False)
             else:
-                self.var = self.add_weight(name='var', shape=(1, self.n_components, self.n_features), dtype='float32',
+                self.var = self.add_weight(name='var', shape=(1, self.n_components, self.n_features), dtype='double',
                                            initializer=tf.initializers.ones, trainable=False)
         elif self.covariance_type == "full":
             if self.var_init is not None:
@@ -154,13 +155,13 @@ class GaussianMixture(tf.keras.models.Model):
                 assert self.var_init.shape == (1, self.n_components, self.n_features,
                                                 self.n_features), "Input var_init does not have required tensor dimensions (1, %i, %i, %i)" % (
                 self.n_components, self.n_features, self.n_features)
-                self.var = self.add_weight(name='var', shape=self.var_init.shape, dtype='float32',
+                self.var = self.add_weight(name='var', shape=self.var_init.shape, dtype='double',
                                            initializer=tf.initializers.constant(self.var_init), trainable=False)
             else:
-                var_init = tf.cast(tf.tile(tf.reshape(tf.eye(self.n_features, dtype='float32'),
+                var_init = tf.cast(tf.tile(tf.reshape(tf.eye(self.n_features, dtype='double'),
                                                 (1, 1, self.n_features, self.n_features)),
-                                     (1, self.n_components, 1, 1)), tf.float32)
-                self.var = self.add_weight(name='var', shape=var_init.shape, dtype='float32',
+                                     (1, self.n_components, 1, 1)), tf.double)
+                self.var = self.add_weight(name='var', shape=var_init.shape, dtype='double',
                                            initializer=tf.initializers.constant(var_init), trainable=False)
 
         # (1, k, 1)
@@ -212,12 +213,15 @@ class GaussianMixture(tf.keras.models.Model):
         """
         self.n_features = x.shape[1]
         self._init_params()
+        random_state = check_random_state(self.random_state)
+        if self.batch == 0:
+            self.batch = x.shape[0]
 
         mu_best = self.mu
         var_best = self.var
         log_likelihood_best = self.log_likelihood
-
-        for init in range(self.n_init):
+        init = 0
+        while init < self.n_init:
             x = self.check_size(x)
 
             if self.init_params == "kmeans" and self.mu_init is None:
@@ -232,13 +236,16 @@ class GaussianMixture(tf.keras.models.Model):
                 mu_old = self.mu
                 var_old = self.var
 
+                x_batch = x.numpy()[random_state.choice(np.arange(x.shape[0]), size=self.batch, replace=False), ...]
+
+                # check for em
                 if self.__check_inv():
-                    init -= 1
+                    init += 1
                     break
-                self.__em(x)
+                self.__em(x_batch)
 
                 if self.__check_inv():
-                    init -= 1
+                    init += 1
                     break
 
                 self.log_likelihood = self.__score(x)
@@ -263,15 +270,19 @@ class GaussianMixture(tf.keras.models.Model):
                     self.__update_var(var_old)
 
             # update weights with best performance
-            if self.log_likelihood > log_likelihood_best:
+            if (self.log_likelihood > log_likelihood_best) and (not self.__check_inv()):
                 log_likelihood_best = self.log_likelihood
                 mu_best = self.mu
                 var_best = self.var
 
             self.params_fitted = True
+            init += 1
 
         self.__update_mu(mu_best)
         self.__update_var(var_best)
+        if self.__check_inv():
+            print('invalid')
+        return log_likelihood_best
 
 
     def predict(self, x, probs=False):
@@ -569,9 +580,5 @@ class GaussianMixture(tf.keras.models.Model):
         return tf.expand_dims(center, 0) * (x_max - x_min) + x_min
 
 
-
 if __name__ == '__main__':
-    model = GaussianMixture(3)
-    model.n_features = 3
-    model._init_params()
-    _, log = model._e_step(np.ones((9, 3)))
+    pass
